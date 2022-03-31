@@ -1,13 +1,15 @@
 import argparse
 import base64
 from io import BytesIO
+from typing import Optional
 
 import cv2
 import numpy as np
 from bg_atlasapi import BrainGlobeAtlas
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
-from bokeh.models import Slider, ColumnDataSource, Button, RadioButtonGroup, PointDrawTool, FileInput
+from bokeh.models import Slider, ColumnDataSource, Button, RadioButtonGroup, PointDrawTool, FileInput, \
+    CheckboxButtonGroup
 from bokeh.plotting import figure, Figure
 
 import _feature
@@ -31,11 +33,14 @@ OPT = AP.parse_args()
 atlas = BrainGlobeAtlas(OPT.use_source, check_latest=OPT.check_latest)
 slice_view = CoronalView(atlas.reference)
 offset_map = slice_view.offset(0, 0)
-image_data: np.ndarray
+image_data_src: Optional[np.ndarray] = None
+image_data: Optional[np.ndarray] = None
 
 # View
 slice_view_name = ['Coronal', 'Sagittal', 'Transverse']
+channel_view_name = ['Red', 'Green', 'Blue']
 slice_view_btn: RadioButtonGroup
+channel_view_btn: CheckboxButtonGroup
 image_file_btn: FileInput
 frame_slider: Slider
 rotate_h_slider: Slider
@@ -72,22 +77,39 @@ def _change_view(e):
     _feature_detect('clear')
 
 
+def _change_channel(e):
+    if image_data_src is None:
+        return
+
+    active = channel_view_btn.active
+    for channel in [0, 1, 2]:
+        if channel in active:
+            image_data[:, :, channel] = image_data_src[:, :, channel]
+        else:
+            image_data[:, :, channel] = 0
+
+    _update_image_tar()
+
+
 def _update_frame(attr, old: int, new: int):
     _update_image_ref(new)
 
 
 def _update_file(attr, old, new):
-    global image_data
+    global image_data_src, image_data
     filename = image_file_btn.filename
 
     if len(filename) == 0:
-        image_data = None
+        image_data_src = image_data = None
     else:
         image = BytesIO(base64.b64decode(image_file_btn.value))
         # https://stackoverflow.com/a/25198846
         image = np.asarray(bytearray(image.getvalue()), dtype=np.uint8)
         image = cv2.imdecode(image, cv2.IMREAD_COLOR)
-        image_data = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+
+        channel_view_btn.active = [0, 1, 2]
+        image_data_src = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+        image_data = image_data_src.copy()
 
     _update_image_tar()
 
@@ -124,7 +146,7 @@ def _update_image_tar():
 
     else:
         w, h, _ = image_data.shape
-        image = image_data.view(dtype=np.uint32).reshape((w, h))
+        image = np.flipud(image_data.view(dtype=np.uint32).reshape((w, h)))
 
     image_tar.data = dict(
         image=[image],
@@ -157,10 +179,16 @@ def _feature_detect(target: str):
 
 # init slice_view_btn
 slice_view_btn = RadioButtonGroup(
-    labels=['Coronal', 'Sagittal', 'Transverse'],
+    labels=slice_view_name,
     active=0
 )
 slice_view_btn.on_click(_change_view)
+
+channel_view_btn = CheckboxButtonGroup(
+    labels=channel_view_name,
+    active=[]
+)
+channel_view_btn.on_click(_change_channel)
 
 # init frame_slider
 frame_slider = Slider(
@@ -256,6 +284,16 @@ figure_ref.add_tools(PointDrawTool(
     description='add reference points'
 ))
 
+annotation_tar = ColumnDataSource(data=dict(x=[], y=[]))
+annotation_tar_plot = figure_tar.scatter(
+    'x', 'y', size=12, color='white',
+    source=annotation_tar,
+)
+figure_tar.add_tools(PointDrawTool(
+    renderers=[annotation_tar_plot],
+    description='add reference points'
+))
+
 #
 feature_detect_btn = Button(label='detect', width_policy='min')
 feature_detect_btn.on_click(lambda it: _feature_detect('ref'))
@@ -278,6 +316,7 @@ model_ref = column(
 )
 model_tar = column(
     image_file_btn,
+    channel_view_btn,
     figure_tar
 )
 model = row(model_ref, model_tar)
