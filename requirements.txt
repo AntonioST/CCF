@@ -1,0 +1,15 @@
+# basic
+numpy
+scipy
+matplotlib
+
+# data IO
+ruamel_yaml
+
+# tool
+jinja2
+bokeh
+bg-atlasapi
+
+# tracking
+opencv

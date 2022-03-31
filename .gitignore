@@ -1,0 +1,13 @@
+# IDEA
+.idea/*
+!.idea/CCF.iml
+!.idea/modules.xml
+
+# python
+__pycache__/
+
+# others
+*.npy
+*.png
+.coverage
+*.log
