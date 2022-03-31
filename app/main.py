@@ -1,14 +1,19 @@
 import argparse
+import base64
+from io import BytesIO
 
+import cv2
+import numpy as np
 from bg_atlasapi import BrainGlobeAtlas
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
-from bokeh.models import Slider, ColumnDataSource, Button, RadioButtonGroup, PointDrawTool
+from bokeh.models import Slider, ColumnDataSource, Button, RadioButtonGroup, PointDrawTool, FileInput
 from bokeh.plotting import figure, Figure
 
 import _feature
 from _slice import *
 
+# CLI
 AP = argparse.ArgumentParser()
 AP.add_argument(
     '--use-source',
@@ -22,15 +27,21 @@ AP.add_argument(
 )
 OPT = AP.parse_args()
 
+# Data
 atlas = BrainGlobeAtlas(OPT.use_source, check_latest=OPT.check_latest)
 slice_view = CoronalView(atlas.reference)
 offset_map = slice_view.offset(0, 0)
+image_data: np.ndarray
 
+# View
 slice_view_name = ['Coronal', 'Sagittal', 'Transverse']
+slice_view_btn: RadioButtonGroup
+image_file_btn: FileInput
 frame_slider: Slider
 rotate_h_slider: Slider
 rotate_v_slider: Slider
-image_data: ColumnDataSource
+image_ref: ColumnDataSource
+image_tar: ColumnDataSource
 figure_ref: Figure
 figure_tar: Figure
 annotation_ref: ColumnDataSource
@@ -57,12 +68,28 @@ def _change_view(e):
     h = rotate_h_slider.value
     v = rotate_v_slider.value
     offset_map = slice_view.offset(h, v)
-    _update_image(frame_slider.value)
+    _update_image_ref(frame_slider.value)
     _feature_detect('clear')
 
 
 def _update_frame(attr, old: int, new: int):
-    _update_image(new)
+    _update_image_ref(new)
+
+
+def _update_file(attr, old, new):
+    global image_data
+    filename = image_file_btn.filename
+
+    if len(filename) == 0:
+        image_data = None
+    else:
+        image = BytesIO(base64.b64decode(image_file_btn.value))
+        # https://stackoverflow.com/a/25198846
+        image = np.asarray(bytearray(image.getvalue()), dtype=np.uint8)
+        image = cv2.imdecode(image, cv2.IMREAD_COLOR)
+        image_data = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+
+    _update_image_tar()
 
 
 def _update_rotate(attr, old: int, new: int):
@@ -70,15 +97,39 @@ def _update_rotate(attr, old: int, new: int):
     h = rotate_h_slider.value
     v = rotate_v_slider.value
     offset_map = slice_view.offset(h, v)
-    _update_image(frame_slider.value)
+    _update_image_ref(frame_slider.value)
 
 
-def _update_image(frame: int):
+def _update_image_ref(frame: int):
     r_frame = slice_view.plane(frame + offset_map)
-    image_data.data = dict(
+    image_ref.data = dict(
         image=[r_frame[::-1, :]],
         dw=[slice_view.width],
         dh=[slice_view.height]
+    )
+
+
+def _update_image_tar():
+    if image_data is None:
+        w = slice_view.width
+        h = slice_view.height
+        image = np.zeros((w, h), dtype=np.uint32)
+        view = image.view(dtype=np.uint8).reshape((w, h, 4))
+        for i in range(w):
+            for j in range(h):
+                view[i, j, 0] = int(255 * i / w)
+                view[i, j, 1] = 158
+                view[i, j, 2] = int(255 * j / h)
+                view[i, j, 3] = 255
+
+    else:
+        w, h, _ = image_data.shape
+        image = image_data.view(dtype=np.uint32).reshape((w, h))
+
+    image_tar.data = dict(
+        image=[image],
+        dw=[w],
+        dh=[h]
     )
 
 
@@ -159,7 +210,7 @@ figure_ref = figure(
 )
 
 # reference image
-image_data = ColumnDataSource(data=dict(
+image_ref = ColumnDataSource(data=dict(
     image=[None],
     dw=[0],
     dh=[0],
@@ -169,8 +220,29 @@ figure_ref.image(
     x=0, y=0,
     dw='dw', dh='dh',
     palette="Cividis256", level="image",
-    source=image_data
+    source=image_ref
 )
+
+figure_tar = figure(
+    width=2 * slice_view.width,
+    height=2 * slice_view.height,
+    toolbar_location='right',
+    tools='pan,wheel_zoom,box_zoom,save,reset'
+)
+image_tar = ColumnDataSource(data=dict(
+    image=[None],
+    dw=[0],
+    dh=[0],
+))
+figure_tar.image_rgba(
+    'image',
+    x=0, y=0,
+    dw='dw', dh='dh',
+    source=image_tar
+)
+
+image_file_btn = FileInput(accept='image/*')
+image_file_btn.on_change('filename', _update_file)
 
 # reference annotations
 # http://docs.bokeh.org/en/1.0.0/docs/user_guide/examples/tools_point_draw.html
@@ -191,10 +263,12 @@ feature_clear_btn = Button(label='clear', width_policy='min')
 feature_clear_btn.on_click(lambda it: _feature_detect('clear'))
 
 # update
-_update_image(frame_slider.value)
+_update_image_ref(frame_slider.value)
+_update_image_tar()
 
 # layout
-model = column(
+
+model_ref = column(
     slice_view_btn,
     frame_slider,
     row(rotate_h_slider, rotate_h_reset),
@@ -202,7 +276,13 @@ model = column(
     figure_ref,
     row(feature_detect_btn, feature_clear_btn)
 )
+model_tar = column(
+    image_file_btn,
+    figure_tar
+)
+model = row(model_ref, model_tar)
 
+# Document
 doc = curdoc()
 doc.add_root(model)
 doc.title = 'CCF'
